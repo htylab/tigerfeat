@@ -1,6 +1,5 @@
 """Core functionality for the TigerFeat feature extraction API."""
 
-import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,19 +8,19 @@ import timm
 from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
 
-try:
+try:  # pragma: no cover - optional dependency for X-ray backend
     import torchxrayvision as _xrv
-except ImportError:
+except ImportError:  # pragma: no cover - handled lazily when backend is required
     _xrv = None
 
-try:
+try:  # pragma: no cover - optional dependency for X-ray backend
     from skimage import io as skio
-except ImportError:
+except ImportError:  # pragma: no cover - handled lazily when backend is required
     skio = None
 
-try:
+try:  # pragma: no cover - torchvision is required only for X-ray models
     import torchvision.transforms as tv_transforms
-except ImportError:
+except ImportError:  # pragma: no cover - handled lazily when backend is required
     tv_transforms = None
 
 
@@ -82,6 +81,8 @@ class TigerFeatModel(object):
         self._initialise_model()
 
     def _initialise_model(self):
+        """Initialise model, backend, and transforms based on the requested config."""
+
         if self.backend == "timm":
             self._initialise_timm_model()
         elif self.backend == "xray":
@@ -107,6 +108,8 @@ class TigerFeatModel(object):
         self.input_size = tuple(input_size) if input_size is not None else None
 
     def _initialise_xray_model(self):
+        """Initialise the torchxrayvision backend."""
+
         if _xrv is None:
             raise ValueError(
                 "X-ray backend requested but torchxrayvision is not installed."
@@ -143,9 +146,9 @@ class TigerFeatModel(object):
         )
 
     def _initialise_hf_model(self):
-        try:
+        try:  # pragma: no cover - optional dependency
             from transformers import AutoModel, AutoProcessor
-        except ImportError as exc:
+        except ImportError as exc:  # pragma: no cover - handled lazily
             raise ValueError(
                 "Hugging Face backend requested but transformers is not installed."
             ) from exc
@@ -194,39 +197,39 @@ class TigerFeatModel(object):
             return torch.device("cpu")
         return torch.device(device)
 
-    # === 改動：開檔錯誤處理 + 僅支援檔案路徑 ===
-
-    def _safe_open_pil(self, path):
-        if not isinstance(path, str):
-            raise TypeError("Image input must be a file path string.")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"File not found: {path}")
-        try:
-            with Image.open(path) as img:
-                return img.convert("RGB")
-        except Exception as e:
-            raise IOError(f"Failed to open image {path}: {e}")
-
-    def _prepare_timm_image(self, path):
-        img = self._safe_open_pil(path)
+    def _prepare_timm_image(self, image):
+        if isinstance(image, Image.Image):
+            img = image.convert("RGB")
+        else:
+            with Image.open(image) as img_file:
+                img = img_file.convert("RGB")
         tensor = self.transform(img).unsqueeze(0)
         return tensor.to(self.device)
 
-    def _prepare_xray_image(self, path):
-        if not isinstance(path, str):
-            raise TypeError("Image input must be a file path string.")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"File not found: {path}")
-        try:
-            img = skio.imread(path)
-        except Exception as e:
-            raise IOError(f"Failed to open image {path}: {e}")
+    def _prepare_xray_image(self, image):
+        if _xrv is None:
+            raise ValueError("X-ray backend requested but torchxrayvision is not installed.")
+        if isinstance(image, str):
+            if skio is None:
+                raise ValueError(
+                    "X-ray backend requires scikit-image to read image files."
+                )
+            img = skio.imread(image)
+        elif isinstance(image, Image.Image):
+            img = np.array(image)
+        else:
+            raise TypeError(
+                "Images must be provided as file paths or PIL.Image instances; "
+                f"received type {type(image)!r}."
+            )
+
         img = _xrv.datasets.normalize(img, 255)
         if img.ndim == 2:
             img = img[None, ...]
         else:
             img = img.mean(2)[None, ...]
         img = img.astype("float32", copy=False)
+
         transformed = self.transform(img)
         if isinstance(transformed, torch.Tensor):
             tensor = transformed.float().unsqueeze(0)
@@ -234,12 +237,14 @@ class TigerFeatModel(object):
             tensor = torch.from_numpy(np.asarray(transformed, dtype="float32")).unsqueeze(0)
         return tensor.to(self.device)
 
-    def _prepare_hf_image(self, path):
-        img = self._safe_open_pil(path)
+    def _prepare_hf_image(self, image):
+        if isinstance(image, Image.Image):
+            img = image.convert("RGB")
+        else:
+            with Image.open(image) as img_file:
+                img = img_file.convert("RGB")
         inputs = self.processor(images=img, return_tensors="pt")
         return inputs.to(self.device)
-
-    # === 原始 preferred_keys 完整保留 ===
 
     @staticmethod
     def _select_features_from_dict(features_dict):
@@ -254,12 +259,12 @@ class TigerFeatModel(object):
             "pooled_features",
             "features",
         ]
+
         for key in preferred_keys:
             if key in features_dict:
                 return features_dict[key]
-        return next(reversed(features_dict.values()))
 
-    # === forward 與 batch 保留原樣，只加 filelist 回傳 ===
+        return next(reversed(features_dict.values()))
 
     def _forward_timm(self, tensor):
         with torch.no_grad():
@@ -299,29 +304,21 @@ class TigerFeatModel(object):
                 raise ValueError("Unknown output structure for HF model.")
         return feat
 
-    # === feat(): 新增錯誤處理與回傳 filelist ===
-
-    def feat(self, image_path):
-        if not isinstance(image_path, str):
-            raise TypeError("Image input must be a file path string.")
-        try:
-            if self.backend == "timm":
-                tensor = self._prepare_timm_image(image_path)
-                feats = self._forward_timm(tensor)
-            elif self.backend == "xray":
-                tensor = self._prepare_xray_image(image_path)
-                feats = self._forward_xray(tensor)
-            elif self.backend == "hf":
-                inputs = self._prepare_hf_image(image_path)
-                feats = self._forward_hf(inputs)
-            else:
-                raise ValueError(f"Unknown backend: {self.backend}")
-            return feats.detach().cpu().squeeze(0).numpy()
-        except Exception as e:
-            print(f"[Warning] Skipped {image_path}: {e}")
-            return np.empty((0,), dtype=np.float32)
-
-    # === feat_batch(): 保留 DataLoader 結構，增加錯誤防護 + filelist ===
+    def feat(self, image):
+        if not isinstance(image, (str, Image.Image)):
+            raise TypeError("Image input must be a file path or PIL.Image instance.")
+        if self.backend == "timm":
+            tensor = self._prepare_timm_image(image)
+            feats = self._forward_timm(tensor)
+        elif self.backend == "xray":
+            tensor = self._prepare_xray_image(image)
+            feats = self._forward_xray(tensor)
+        elif self.backend == "hf":
+            inputs = self._prepare_hf_image(image)
+            feats = self._forward_hf(inputs)
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
+        return feats.detach().cpu().squeeze(0).numpy()
 
     def feat_batch(
         self,
@@ -333,16 +330,40 @@ class TigerFeatModel(object):
         use_dataloader=None,
         dataloader_threshold=1000,
     ):
-        if isinstance(images, str):
-            images = [images]
-        elif not isinstance(images, (list, tuple)):
-            raise TypeError("Input must be a list/tuple of file paths.")
+        """
+        Extract features from one or more images with automatic mini-batching and optional DataLoader acceleration.
 
-        images = [p for p in images if isinstance(p, str)]
+        Parameters
+        ----------
+        images : str | PIL.Image | list[Union[str, PIL.Image]]
+            單張或多張影像（路徑或 PIL 物件）。
+        batch_size : int
+            每批大小（對 timm/xray/hf 都生效；hf 會將同批次影像丟入 processor）。
+        num_workers : Optional[int]
+            DataLoader worker 數；None 表示自動：CUDA 上預設 4，CPU/MPS 預設 0。
+        pin_memory : bool
+            DataLoader 的 pin memory（CUDA 上建議 True）。
+        show_progress : Optional[bool]
+            是否顯示進度條；None 表示自動（len(images) >= dataloader_threshold 時顯示）。
+        use_dataloader : Optional[bool]
+            是否使用 DataLoader；None 表示自動（len(images) >= dataloader_threshold 時對 timm/xray 啟用）。
+            hf backend 預設不使用 DataLoader（processor 本身支援 batch）。
+        dataloader_threshold : int
+            觸發 DataLoader/進度條的資料量門檻。
+        """
+        # 規整輸入
+        single = False
+        if isinstance(images, (str, Image.Image)):
+            images = [images]
+            single = True
+        elif not isinstance(images, (list, tuple)):
+            raise TypeError("Input must be a file path, PIL.Image, or list/tuple of them.")
+
         n = len(images)
         if n == 0:
-            return np.empty((0,), dtype=np.float32), []
+            return np.empty((0,), dtype=np.float32)
 
+        # 進度條設定
         try:
             from tqdm import tqdm as _tqdm
         except Exception:
@@ -350,130 +371,124 @@ class TigerFeatModel(object):
         if show_progress is None:
             show_progress = n >= dataloader_threshold
 
+        # DataLoader 開關
         if use_dataloader is None:
             use_dataloader = (self.backend in ("timm", "xray")) and (n >= dataloader_threshold)
 
+        # 自動 num_workers
         if num_workers is None:
-            num_workers = 4 if self.device.type == "cuda" else 0
+            if self.device.type == "cuda":
+                num_workers = 4
+            else:
+                num_workers = 0
 
         all_feats = []
-        filelist = []
 
         if self.backend == "hf":
-            for start in (_tqdm(range(0, n, batch_size), desc="Extracting") if (show_progress and _tqdm) else range(0, n, batch_size)):
+            # HuggingFace：直接用 processor 的 batch 支援
+            for start in (_tqdm(range(0, n, batch_size), desc="Extracting features") if (show_progress and _tqdm) else range(0, n, batch_size)):
                 chunk = images[start:start + batch_size]
-                valid_imgs, valid_files = [], []
-                for p in chunk:
-                    try:
-                        valid_imgs.append(self._safe_open_pil(p))
-                        valid_files.append(p)
-                    except Exception as e:
-                        print(f"[Warning] Skipped {p}: {e}")
-                if not valid_imgs:
-                    continue
-                inputs = self.processor(images=valid_imgs, return_tensors="pt").to(self.device)
+                pil_list = [Image.open(p).convert("RGB") if isinstance(p, str) else p.convert("RGB") for p in chunk]
+                inputs = self.processor(images=pil_list, return_tensors="pt").to(self.device)
                 feats = self._forward_hf(inputs)
                 all_feats.append(feats.detach().cpu())
-                filelist.extend(valid_files)
+                torch.cuda.empty_cache()
         else:
             if use_dataloader:
+                # 使用 DataLoader 加速（timm / xray）
                 from torch.utils.data import Dataset, DataLoader
 
                 if self.backend == "timm":
                     transform = self.transform
 
                     class _TimmDataset(Dataset):
-                        def __init__(self, paths): self.paths = paths
-                        def __len__(self): return len(self.paths)
+                        def __init__(self, paths_or_pils):
+                            self.items = paths_or_pils
+                        def __len__(self):
+                            return len(self.items)
                         def __getitem__(self, idx):
-                            path = self.paths[idx]
-                            try:
-                                with Image.open(path) as f:
+                            item = self.items[idx]
+                            if isinstance(item, Image.Image):
+                                img = item.convert("RGB")
+                            else:
+                                with Image.open(item) as f:
                                     img = f.convert("RGB")
-                                return transform(img), path
-                            except Exception as e:
-                                print(f"[Warning] Skipped {path}: {e}")
-                                return None
+                            return transform(img)
+
+                    ds = _TimmDataset(images)
 
                 elif self.backend == "xray":
+                    if _xrv is None or skio is None or tv_transforms is None:
+                        raise ValueError("X-ray backend requires torchxrayvision, scikit-image, and torchvision.")
                     xray_transform = self.transform
 
                     class _XrayDataset(Dataset):
-                        def __init__(self, paths): self.paths = paths
-                        def __len__(self): return len(self.paths)
+                        def __init__(self, paths_or_pils):
+                            self.items = paths_or_pils
+                        def __len__(self):
+                            return len(self.items)
                         def __getitem__(self, idx):
-                            path = self.paths[idx]
-                            try:
-                                img = skio.imread(path)
-                                img = _xrv.datasets.normalize(img, 255)
-                                if img.ndim == 2:
-                                    img = img[None, ...]
-                                else:
-                                    img = img.mean(2)[None, ...]
-                                img = img.astype("float32", copy=False)
-                                out = xray_transform(img)
-                                t = torch.from_numpy(np.asarray(out, dtype="float32"))
-                                return t, path
-                            except Exception as e:
-                                print(f"[Warning] Skipped {path}: {e}")
-                                return None
+                            item = self.items[idx]
+                            if isinstance(item, str):
+                                img = skio.imread(item)
+                            else:
+                                img = np.array(item)
+                            img = _xrv.datasets.normalize(img, 255)
+                            if img.ndim == 2:
+                                img = img[None, ...]
+                            else:
+                                img = img.mean(2)[None, ...]
+                            img = img.astype("float32", copy=False)
+                            out = xray_transform(img)
+                            if isinstance(out, torch.Tensor):
+                                return out.float()
+                            return torch.from_numpy(np.asarray(out, dtype="float32"))
 
+                    ds = _XrayDataset(images)
                 else:
                     raise ValueError(f"Unsupported backend for DataLoader: {self.backend}")
 
-                class _Collate:
-                    def __call__(self, batch):
-                        batch = [b for b in batch if b is not None]
-                        if not batch:
-                            return torch.empty(0), []
-                        tensors, paths = zip(*batch)
-                        return torch.stack(tensors), list(paths)
-
                 loader = DataLoader(
-                    (_TimmDataset(images) if self.backend == "timm" else _XrayDataset(images)),
+                    ds,
                     batch_size=batch_size,
                     num_workers=num_workers,
                     pin_memory=pin_memory if self.device.type == "cuda" else False,
-                    collate_fn=_Collate(),
                 )
 
-                iterator = _tqdm(loader, desc="Extracting") if (show_progress and _tqdm) else loader
+                iterator = _tqdm(loader, desc="Extracting features") if (show_progress and _tqdm) else loader
                 with torch.no_grad():
-                    for batch, paths in iterator:
-                        if batch.numel() == 0:
-                            continue
-                        batch = batch.to(self.device)
-                        feats = self._forward_timm(batch) if self.backend == "timm" else self._forward_xray(batch)
+                    for batch in iterator:
+                        batch = batch.to(self.device, non_blocking=True)
+                        if self.backend == "timm":
+                            feats = self._forward_timm(batch)
+                        else:  # xray
+                            feats = self._forward_xray(batch)
                         all_feats.append(feats.detach().cpu())
-                        filelist.extend(paths)
+                        torch.cuda.empty_cache()
             else:
-                rng = _tqdm(range(0, n, batch_size), desc="Extracting") if (show_progress and _tqdm) else range(0, n, batch_size)
+                # 小資料集：舊的 chunk 方式
+                rng = _tqdm(range(0, n, batch_size), desc="Extracting features") if (show_progress and _tqdm) else range(0, n, batch_size)
                 for start in rng:
                     chunk = images[start:start + batch_size]
-                    tensors, valids = [], []
-                    for p in chunk:
-                        try:
-                            if self.backend == "timm":
-                                tensors.append(self._prepare_timm_image(p))
-                            else:
-                                tensors.append(self._prepare_xray_image(p))
-                            valids.append(p)
-                        except Exception as e:
-                            print(f"[Warning] Skipped {p}: {e}")
-                    if not tensors:
-                        continue
-                    batch = torch.cat(tensors, dim=0)
-                    feats = self._forward_timm(batch) if self.backend == "timm" else self._forward_xray(batch)
+                    if self.backend == "timm":
+                        tensors = [self._prepare_timm_image(img) for img in chunk]
+                        batch = torch.cat(tensors, dim=0)
+                        feats = self._forward_timm(batch)
+                    elif self.backend == "xray":
+                        tensors = [self._prepare_xray_image(img) for img in chunk]
+                        batch = torch.cat(tensors, dim=0)
+                        feats = self._forward_xray(batch)
+                    else:
+                        raise ValueError(f"Unknown backend: {self.backend}")
                     all_feats.append(feats.detach().cpu())
-                    filelist.extend(valids)
-
-        if not all_feats:
-            return np.empty((0,), dtype=np.float32), []
+                    torch.cuda.empty_cache()
 
         feats = torch.cat(all_feats, dim=0).numpy()
-        return feats, filelist
+        return feats #[0] if single else feats
 
     def info(self):
+        """Return a dictionary describing the current model instance."""
+
         return {
             "backend": self.backend,
             "model_name": self.model_name,
@@ -483,5 +498,6 @@ class TigerFeatModel(object):
 
 
 def init(**kwargs):
+    """Initialise a :class:`TigerFeatModel` with the provided configuration."""
     config = TigerFeatConfig(**_normalise_model_kwargs(kwargs))
     return TigerFeatModel(config)
