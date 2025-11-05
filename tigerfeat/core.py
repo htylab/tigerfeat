@@ -354,7 +354,7 @@ class TigerFeatModel(object):
             use_dataloader = (self.backend in ("timm", "xray")) and (n >= dataloader_threshold)
 
         if num_workers is None:
-            num_workers = 4 if self.device.type == "cuda" else 0
+            num_workers = 8 if self.device.type == "cuda" else 0
 
         all_feats = []
         filelist = []
@@ -485,3 +485,39 @@ class TigerFeatModel(object):
 def init(**kwargs):
     config = TigerFeatConfig(**_normalise_model_kwargs(kwargs))
     return TigerFeatModel(config)
+
+
+def save_parquet(path, features, filelist, compression="snappy"):
+    """
+    將特徵與檔案名稱儲存成單一 Parquet 檔案。
+
+    Parameters
+    ----------
+    path : str
+        輸出檔案路徑，例如 "features.parquet"。
+    features : np.ndarray
+        特徵矩陣 (N, D)。
+    filelist : list[str]
+        對應的影像檔名清單。
+    compression : str, default="snappy"
+        Parquet 壓縮方式，可選 "snappy", "brotli", "gzip"。
+    """
+    import pandas as pd
+    import numpy as np
+    import os
+
+    if not isinstance(features, np.ndarray):
+        raise TypeError("features 必須是 numpy.ndarray")
+    if not isinstance(filelist, (list, tuple)):
+        raise TypeError("filelist 必須是 list 或 tuple")
+    if features.shape[0] != len(filelist):
+        raise ValueError(f"features 筆數 ({features.shape[0]}) 與 filelist 長度 ({len(filelist)}) 不符。")
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    df = pd.DataFrame({
+        "file": filelist,
+        "feature": [f.astype(np.float32).tolist() for f in features],
+    })
+    df.to_parquet(path, index=False, compression=compression)
+    print(f"[save_parquet] Wrote {len(filelist)} records → {path}")
