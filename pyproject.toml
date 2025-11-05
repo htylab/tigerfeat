@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tigerfeat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight feature extraction wrapper for timm vision models"
 readme = "README.md"
 authors = [{name = "TigerFeat"}]
