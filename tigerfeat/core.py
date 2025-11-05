@@ -1,10 +1,26 @@
 """Core functionality for the TigerFeat feature extraction API."""
 
+import numpy as np
 import torch
 from PIL import Image
 import timm
 from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
+
+try:  # pragma: no cover - optional dependency for X-ray backend
+    import torchxrayvision as _xrv
+except ImportError:  # pragma: no cover - handled lazily when backend is required
+    _xrv = None
+
+try:  # pragma: no cover - optional dependency for X-ray backend
+    from skimage import io as skio
+except ImportError:  # pragma: no cover - handled lazily when backend is required
+    skio = None
+
+try:  # pragma: no cover - torchvision is required only for X-ray models
+    import torchvision.transforms as tv_transforms
+except ImportError:  # pragma: no cover - handled lazily when backend is required
+    tv_transforms = None
 
 __all__ = ["TigerFeatModel", "init"]
 
@@ -28,7 +44,7 @@ def _normalise_model_kwargs(kwargs):
 
 
 class TigerFeatModel(object):
-    """A lightweight wrapper that exposes a ``feat`` method for timm models."""
+    """A lightweight wrapper that exposes a ``feat`` method for vision models."""
 
     def __init__(self, config=None, **kwargs):
         if config is None:
@@ -38,18 +54,73 @@ class TigerFeatModel(object):
 
         self.config = config
         self.device = self._resolve_device(config.device)
+        self.backend = None
+        self.transform = None
+        self.input_size = None
 
-        self.model = timm.create_model(
-            config.model,
-            pretrained=config.pretrained,
-        )
+        self._initialise_model()
+
+    def _initialise_model(self):
+        """Initialise model, backend, and transforms based on the requested config."""
+
+        try:
+            self.model = timm.create_model(
+                self.config.model,
+                pretrained=self.config.pretrained,
+            )
+        except Exception:
+            self._initialise_xray_model()
+        else:
+            self.backend = "timm"
+            self.model.eval()
+            self.model.to(self.device)
+
+            data_config = resolve_data_config({}, model=self.model)
+            transform_kwargs = dict(self.config.transform_kwargs)
+            transform_kwargs.setdefault("is_training", False)
+            self.transform = create_transform(**data_config, **transform_kwargs)
+            input_size = data_config.get("input_size")
+            self.input_size = tuple(input_size) if input_size is not None else None
+
+    def _initialise_xray_model(self):
+        """Initialise torchxrayvision backend when timm initialisation fails."""
+
+        if _xrv is None:
+            raise ValueError(
+                "Unknown model backend. Not found in timm or torchxrayvision, "
+                "and torchxrayvision is not installed."
+            )
+        if skio is None:
+            raise ValueError(
+                "torchxrayvision backend requires scikit-image; please install it to "
+                "load radiograph images."
+            )
+        if tv_transforms is None:
+            raise ValueError(
+                "torchxrayvision backend requires torchvision for preprocessing transforms."
+            )
+
+        try:
+            self.model = _xrv.models.get_model(self.config.model)
+        except Exception as exc:
+            raise ValueError(
+                "Unknown model backend. Not found in timm or torchxrayvision."
+            ) from exc
+
+        self.backend = "xray"
         self.model.eval()
         self.model.to(self.device)
 
-        data_config = resolve_data_config({}, model=self.model)
-        transform_kwargs = dict(config.transform_kwargs)
-        transform_kwargs.setdefault("is_training", False)
-        self.transform = create_transform(**data_config, **transform_kwargs)
+        size = getattr(self.model, "img_size", 224)
+        if isinstance(size, (tuple, list)):
+            size = size[0]
+        self.input_size = (1, int(size), int(size))
+        self.transform = tv_transforms.Compose(
+            [
+                _xrv.datasets.XRayCenterCrop(),
+                _xrv.datasets.XRayResizer(int(size)),
+            ]
+        )
 
     @staticmethod
     def _resolve_device(device):
@@ -62,6 +133,13 @@ class TigerFeatModel(object):
         return torch.device(device)
 
     def _prepare_batch(self, images):
+        if self.backend == "timm":
+            return self._prepare_timm_batch(images)
+        if self.backend == "xray":
+            return self._prepare_xray_batch(images)
+        raise ValueError(f"Unknown backend: {self.backend}")
+
+    def _prepare_timm_batch(self, images):
         processed = []
         for image in images:
             if isinstance(image, str):
@@ -77,7 +155,45 @@ class TigerFeatModel(object):
         batch = torch.stack(processed, dim=0)
         return batch.to(self.device)
 
-    def _forward_features(self, batch):
+    def _prepare_xray_batch(self, images):
+        processed = []
+        for image in images:
+            if isinstance(image, str):
+                img = skio.imread(image)
+            elif isinstance(image, Image.Image):
+                img = np.array(image)
+            else:
+                raise TypeError(
+                    "Images must be provided as file paths or PIL.Image instances; "
+                    "received type %r." % (type(image),)
+                )
+
+            img = _xrv.datasets.normalize(img, 255)
+            if img.ndim == 2:
+                img = img[None, ...]
+            elif img.ndim == 3:
+                img = img.mean(axis=2, keepdims=False)[None, ...]
+            else:
+                raise ValueError(
+                    "Radiograph inputs must be 2D or RGB images; received array with "
+                    f"shape {img.shape}."
+                )
+
+            img = img.astype("float32", copy=False)
+            transformed = self.transform(img)
+            if isinstance(transformed, torch.Tensor):
+                tensor = transformed.float()
+            else:
+                tensor = torch.from_numpy(np.asarray(transformed)).float()
+
+            if tensor.ndim == 2:
+                tensor = tensor.unsqueeze(0)
+            processed.append(tensor)
+
+        batch = torch.stack(processed, dim=0)
+        return batch.to(self.device)
+
+    def _forward_timm_features(self, batch):
         with torch.no_grad():
             features = self.model.forward_features(batch)
 
@@ -96,6 +212,21 @@ class TigerFeatModel(object):
                 features = features[-1]
             elif isinstance(features, dict):
                 features = self._select_features_from_dict(features)
+
+        return features
+
+    def _forward_xray_features(self, batch):
+        with torch.no_grad():
+            features = self.model.features(batch)
+            if isinstance(features, (list, tuple)):
+                features = features[-1]
+            if isinstance(features, dict):
+                features = self._select_features_from_dict(features)
+
+            if isinstance(features, torch.Tensor) and features.ndim == 4:
+                features = torch.nn.functional.adaptive_avg_pool2d(features, (1, 1))
+            if isinstance(features, torch.Tensor):
+                features = features.flatten(start_dim=1)
 
         return features
 
@@ -171,7 +302,14 @@ class TigerFeatModel(object):
             raise TypeError("Image input must be a path, PIL.Image, or a sequence of those types.")
 
         batch = self._prepare_batch(images)
-        features = self._forward_features(batch)
+
+        if self.backend == "timm":
+            features = self._forward_timm_features(batch)
+        elif self.backend == "xray":
+            features = self._forward_xray_features(batch)
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
+
         pooled = self._pool_features(features, pool)
         pooled = pooled.detach().cpu()
 

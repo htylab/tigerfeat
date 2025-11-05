@@ -18,6 +18,9 @@ dependencies = [
     "torch",
     "timm",
     "Pillow",
+    "torchvision",
+    "torchxrayvision",
+    "scikit-image",
 ]
 
 [project.urls]
