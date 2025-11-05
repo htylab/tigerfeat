@@ -28,7 +28,13 @@ __all__ = ["TigerFeatModel", "init"]
 class TigerFeatConfig(object):
     """Simple configuration container for :class:`TigerFeatModel`."""
 
-    def __init__(self, model="dinov2", pretrained=True, device=None, transform_kwargs=None):
+    def __init__(
+        self,
+        model="timm@dinov2",
+        pretrained=True,
+        device=None,
+        transform_kwargs=None,
+    ):
         self.model = model
         self.pretrained = pretrained
         self.device = device
@@ -54,60 +60,74 @@ class TigerFeatModel(object):
 
         self.config = config
         self.device = self._resolve_device(config.device)
-        self.backend = None
+        self.backend, self.model_name = self._parse_model_identifier(self.config.model)
         self.transform = None
         self.input_size = None
+        self.data_config = None
 
         self._initialise_model()
+
+    @staticmethod
+    def _parse_model_identifier(identifier):
+        if not isinstance(identifier, str) or "@" not in identifier:
+            raise ValueError(
+                "Model identifier must be a string in the format '<backend>@<model_name>'."
+            )
+        backend, model_name = identifier.split("@", 1)
+        backend = backend.strip().lower()
+        model_name = model_name.strip()
+        if not backend or not model_name:
+            raise ValueError("Both backend and model name must be provided in the model identifier.")
+        return backend, model_name
 
     def _initialise_model(self):
         """Initialise model, backend, and transforms based on the requested config."""
 
-        try:
-            self.model = timm.create_model(
-                self.config.model,
-                pretrained=self.config.pretrained,
-            )
-        except Exception:
+        if self.backend == "timm":
+            self._initialise_timm_model()
+        elif self.backend == "xray":
             self._initialise_xray_model()
         else:
-            self.backend = "timm"
-            self.model.eval()
-            self.model.to(self.device)
+            raise ValueError(f"Unsupported backend: {self.backend}")
 
-            data_config = resolve_data_config({}, model=self.model)
-            transform_kwargs = dict(self.config.transform_kwargs)
-            transform_kwargs.setdefault("is_training", False)
-            self.transform = create_transform(**data_config, **transform_kwargs)
-            input_size = data_config.get("input_size")
-            self.input_size = tuple(input_size) if input_size is not None else None
+    def _initialise_timm_model(self):
+        self.model = timm.create_model(
+            self.model_name,
+            pretrained=self.config.pretrained,
+        )
+        self.model.eval()
+        self.model.to(self.device)
+
+        self.data_config = resolve_data_config({}, model=self.model)
+        transform_kwargs = dict(self.config.transform_kwargs)
+        transform_kwargs.setdefault("is_training", False)
+        self.transform = create_transform(**self.data_config, **transform_kwargs)
+        input_size = self.data_config.get("input_size")
+        self.input_size = tuple(input_size) if input_size is not None else None
 
     def _initialise_xray_model(self):
-        """Initialise torchxrayvision backend when timm initialisation fails."""
+        """Initialise the torchxrayvision backend."""
 
         if _xrv is None:
             raise ValueError(
-                "Unknown model backend. Not found in timm or torchxrayvision, "
-                "and torchxrayvision is not installed."
+                "X-ray backend requested but torchxrayvision is not installed."
             )
         if skio is None:
             raise ValueError(
-                "torchxrayvision backend requires scikit-image; please install it to "
-                "load radiograph images."
+                "X-ray backend requires scikit-image; please install it to load radiograph images."
             )
         if tv_transforms is None:
             raise ValueError(
-                "torchxrayvision backend requires torchvision for preprocessing transforms."
+                "X-ray backend requires torchvision for preprocessing transforms."
             )
 
         try:
-            self.model = _xrv.models.get_model(self.config.model)
+            self.model = _xrv.models.get_model(self.model_name)
         except Exception as exc:
             raise ValueError(
-                "Unknown model backend. Not found in timm or torchxrayvision."
+                f"Unknown X-ray model '{self.model_name}'."
             ) from exc
 
-        self.backend = "xray"
         self.model.eval()
         self.model.to(self.device)
 
@@ -316,6 +336,16 @@ class TigerFeatModel(object):
         if single:
             return pooled.squeeze(0)
         return pooled
+
+    def info(self):
+        """Return a dictionary describing the current model instance."""
+
+        return {
+            "backend": self.backend,
+            "model_name": self.model_name,
+            "input_size": self.input_size,
+            "device": str(self.device),
+        }
 
 
 def init(**kwargs):
