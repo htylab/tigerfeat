@@ -1,5 +1,5 @@
-"""TigerFeat: Simple feature extraction interface for timm models."""
+"""TigerFeat: Simple feature extraction interface for vision models."""
 
-from .core import init, TigerFeatModel
+from .core import init
 
-__all__ = ["init", "TigerFeatModel"]
+__all__ = ["init"]

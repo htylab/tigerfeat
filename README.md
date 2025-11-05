@@ -22,14 +22,19 @@ pip install https://github.com/htylab/tigerfeat/archive/main.zip
 import tigerfeat
 
 model = tigerfeat.init(model="timm@resnet50")
-feature_vector = model.feat("/path/to/image.jpg")
+features = model.feat("/path/to/image.jpg")
 
-print(feature_vector.shape)
-# torch.Size([1536])
+print(model.backend)
+# "timm"
+print(model.input_size)
+# (3, 224, 224)
+print(features.shape)
+# torch.Size([2048])
 ```
 
-The `model` argument uses the `<backend>@<model_name>` syntax. Available
-backends are:
+The package now exposes a single entry point – `tigerfeat.init()` – which
+returns a ready-to-use model wrapper. The `model` argument uses the
+`<backend>@<model_name>` syntax. Available backends are:
 
 - `timm` – any architecture supported by the `timm` library.
 - `xray` – radiology models provided by `torchxrayvision` (requires the
