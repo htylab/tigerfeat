@@ -372,7 +372,7 @@ class TigerFeatModel(object):
             pbar = tqdm.tqdm(range(0, len(images), batch_size))
         else:
             pbar = range(0, len(images), batch_size)
-        for start in tqdm.tqdm(range(0, len(images), batch_size)):
+        for start in pbar:
             chunk = images[start:start + batch_size]
     
             if self.backend == "timm":
