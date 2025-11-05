@@ -368,6 +368,10 @@ class TigerFeatModel(object):
     
         # process in chunks
         import tqdm
+        if len(images) > 100:
+            pbar = tqdm.tqdm(range(0, len(images), batch_size))
+        else:
+            pbar = range(0, len(images), batch_size)
         for start in tqdm.tqdm(range(0, len(images), batch_size)):
             chunk = images[start:start + batch_size]
     
