@@ -84,11 +84,36 @@ class TigerFeatModel(object):
         if isinstance(features, (list, tuple)):
             features = features[-1]
         elif isinstance(features, dict):
-            features = list(features.values())[-1]
+            features = self._select_features_from_dict(features)
 
         if features.ndim == 2:
             features = features.unsqueeze(-1).unsqueeze(-1)
         return features
+
+    @staticmethod
+    def _select_features_from_dict(features_dict):
+        preferred_keys = [
+            "x_norm_clstoken",
+            "x_norm_cls_token",
+            "cls_token",
+            "class_token",
+            "image_features",
+            "pooled_features",
+            "features",
+        ]
+
+        for key in preferred_keys:
+            if key in features_dict:
+                return features_dict[key]
+
+        for value in reversed(list(features_dict.values())):
+            ndim = getattr(value, "ndim", None)
+            if ndim is None:
+                continue
+            if ndim > 1 and getattr(value, "numel", lambda: 0)() > 1:
+                return value
+
+        return next(reversed(features_dict.values()))
 
     def _pool_features(self, features, pool):
         pool = pool.lower()
