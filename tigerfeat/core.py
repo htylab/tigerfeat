@@ -81,13 +81,22 @@ class TigerFeatModel(object):
         with torch.no_grad():
             features = self.model.forward_features(batch)
 
-        if isinstance(features, (list, tuple)):
-            features = features[-1]
-        elif isinstance(features, dict):
-            features = self._select_features_from_dict(features)
+            if isinstance(features, (list, tuple)):
+                features = features[-1]
+            elif isinstance(features, dict):
+                features = self._select_features_from_dict(features)
 
-        if features.ndim == 2:
-            features = features.unsqueeze(-1).unsqueeze(-1)
+            if hasattr(self.model, "forward_head"):
+                try:
+                    features = self.model.forward_head(features, pre_logits=True)
+                except TypeError:
+                    features = self.model.forward_head(features)
+
+            if isinstance(features, (list, tuple)):
+                features = features[-1]
+            elif isinstance(features, dict):
+                features = self._select_features_from_dict(features)
+
         return features
 
     @staticmethod
@@ -116,31 +125,36 @@ class TigerFeatModel(object):
         return next(reversed(features_dict.values()))
 
     def _pool_features(self, features, pool):
-        pool = pool.lower()
-        if pool not in {"avg", "max", "avgmax"}:
-            raise ValueError("pool must be one of 'avg', 'max', or 'avgmax'.")
+        if isinstance(features, torch.Tensor) and features.ndim == 2 and features.shape[1] > 1:
+            return features
 
-        if pool in {"avg", "avgmax"}:
-            avg_feat = torch.nn.functional.adaptive_avg_pool2d(features, (1, 1))
-        else:
-            avg_feat = None
+        if isinstance(features, torch.Tensor) and features.ndim == 4:
+            pool = pool.lower()
+            if pool not in {"avg", "max", "avgmax"}:
+                raise ValueError("pool must be one of 'avg', 'max', or 'avgmax'.")
 
-        if pool in {"max", "avgmax"}:
-            max_feat = torch.nn.functional.adaptive_max_pool2d(features, (1, 1))
-        else:
-            max_feat = None
+            avg_feat = max_feat = None
+            if pool in {"avg", "avgmax"}:
+                avg_feat = torch.nn.functional.adaptive_avg_pool2d(features, (1, 1))
+            if pool in {"max", "avgmax"}:
+                max_feat = torch.nn.functional.adaptive_max_pool2d(features, (1, 1))
 
-        outputs = []
-        if avg_feat is not None:
-            outputs.append(avg_feat)
-        if max_feat is not None:
-            outputs.append(max_feat)
+            outputs = []
+            if avg_feat is not None:
+                outputs.append(avg_feat)
+            if max_feat is not None:
+                outputs.append(max_feat)
 
-        if len(outputs) == 1:
-            combined = outputs[0]
-        else:
-            combined = torch.cat(outputs, dim=1)
-        return combined.flatten(start_dim=1)
+            combined = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=1)
+            return combined.flatten(start_dim=1)
+
+        if isinstance(features, torch.Tensor) and features.ndim >= 2:
+            return features.reshape(features.shape[0], -1)
+
+        if isinstance(features, torch.Tensor):
+            return features.unsqueeze(0)
+
+        return features
 
     def feat(self, image, pool="avg"):
         """Extract a feature vector from an image or a batch of images."""
