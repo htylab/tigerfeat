@@ -319,7 +319,7 @@ class TigerFeatModel(object):
             raise ValueError(f"Unknown backend: {self.backend}")
         return feats.detach().cpu().squeeze(0)
     
-    def feat(self, images):
+    def feat_v2(self, images):
         """
         Extract features from one or more images.
         Accepts a single file path, PIL.Image, or a list of them.
@@ -348,6 +348,62 @@ class TigerFeatModel(object):
     
         feats = feats.detach().cpu()
         return feats[0] if single else feats
+
+    def feat(self, images, batch_size=16):
+        """
+        Extract features from one or more images.
+        Supports automatic batching to avoid GPU memory overflow.
+        Accepts:
+            - Single file path or PIL.Image
+            - List/Tuple of paths or images
+        """
+        single = False
+        if isinstance(images, (str, Image.Image)):
+            images = [images]
+            single = True
+        elif not isinstance(images, (list, tuple)):
+            raise TypeError("Input must be a file path, PIL.Image, or list/tuple of them.")
+    
+        all_feats = []
+    
+        # process in chunks
+        import tqdm
+        for start in tqdm.tqdm(range(0, len(images), batch_size)):
+            chunk = images[start:start + batch_size]
+    
+            if self.backend == "timm":
+                tensors = [self._prepare_timm_image(img) for img in chunk]
+                batch = torch.cat(tensors, dim=0)
+                feats = self._forward_timm(batch)
+    
+            elif self.backend == "xray":
+                tensors = [self._prepare_xray_image(img) for img in chunk]
+                batch = torch.cat(tensors, dim=0)
+                feats = self._forward_xray(batch)
+    
+            elif self.backend == "hf":
+                inputs = self.processor(
+                    images=[
+                        Image.open(p).convert("RGB") if isinstance(p, str) else p.convert("RGB")
+                        for p in chunk
+                    ],
+                    return_tensors="pt"
+                ).to(self.device)
+                feats = self._forward_hf(inputs)
+    
+            else:
+                raise ValueError(f"Unknown backend: {self.backend}")
+    
+            all_feats.append(feats.detach().cpu())
+    
+            # optional: free VRAM
+            del feats, batch
+            torch.cuda.empty_cache()
+    
+        # concat all features
+        feats = torch.cat(all_feats, dim=0)
+        return feats.numpy()
+
 
 
     def info(self):
