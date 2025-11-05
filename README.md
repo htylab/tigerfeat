@@ -6,7 +6,7 @@ that makes it convenient to extract pooled feature vectors from any timm vision 
 ## Installation
 
 ```bash
-pip install tigerfeat
+pip install https://github.com/htylab/tigerfeat/archive/main.zip
 ```
 
 ## Usage
