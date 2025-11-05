@@ -397,7 +397,7 @@ class TigerFeatModel(object):
             all_feats.append(feats.detach().cpu())
     
             # optional: free VRAM
-            del feats, batch
+            #del feats, batch
             torch.cuda.empty_cache()
     
         # concat all features
