@@ -23,9 +23,6 @@ try:  # pragma: no cover - torchvision is required only for X-ray models
 except ImportError:  # pragma: no cover - handled lazily when backend is required
     tv_transforms = None
 
-__all__ = ["TigerFeatModel", "init"]
-
-
 class TigerFeatConfig(object):
     """Simple configuration container for :class:`TigerFeatModel`."""
 
