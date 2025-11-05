@@ -303,7 +303,7 @@ class TigerFeatModel(object):
                 raise ValueError("Unknown output structure for HF model.")
         return feat
 
-    def feat(self, image):
+    def feat_single(self, image):
         if not isinstance(image, (str, Image.Image)):
             raise TypeError("Image input must be a file path or PIL.Image instance.")
         if self.backend == "timm":
@@ -318,6 +318,37 @@ class TigerFeatModel(object):
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
         return feats.detach().cpu().squeeze(0)
+    
+    def feat(self, images):
+        """
+        Extract features from one or more images.
+        Accepts a single file path, PIL.Image, or a list of them.
+        """
+        single = False
+        if isinstance(images, (str, Image.Image)):
+            images = [images]
+            single = True
+        elif not isinstance(images, (list, tuple)):
+            raise TypeError("Input must be a file path, PIL.Image, or list/tuple of them.")
+    
+        if self.backend == "timm":
+            tensors = [self._prepare_timm_image(img) for img in images]
+            batch = torch.cat(tensors, dim=0)
+            feats = self._forward_timm(batch)
+        elif self.backend == "xray":
+            tensors = [self._prepare_xray_image(img) for img in images]
+            batch = torch.cat(tensors, dim=0)
+            feats = self._forward_xray(batch)
+        elif self.backend == "hf":
+            inputs = self.processor(images=[Image.open(p).convert("RGB") if isinstance(p, str) else p.convert("RGB") for p in images],
+                                    return_tensors="pt").to(self.device)
+            feats = self._forward_hf(inputs)
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
+    
+        feats = feats.detach().cpu()
+        return feats[0] if single else feats
+
 
     def info(self):
         """Return a dictionary describing the current model instance."""
